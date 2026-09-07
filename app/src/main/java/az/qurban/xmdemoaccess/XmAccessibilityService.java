@@ -27,8 +27,8 @@ import java.util.concurrent.TimeUnit;
 
 public class XmAccessibilityService extends AccessibilityService {
     private static final String XM_PACKAGE = "com.xm.webapp";
-    private static final long COOLDOWN_MS = 10L * 60L * 1000L;
-    private static final int MAX_TRADES = 2;
+    private static final long COOLDOWN_MS = 90L * 1000L;
+    private static final int MAX_TRADES = 5;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ScheduledExecutorService scheduler;
@@ -42,7 +42,7 @@ public class XmAccessibilityService extends AccessibilityService {
         setServiceInfo(info);
 
         scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(this::analyzeMarketSafe, 1, 30, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::analyzeMarketSafe, 1, 20, TimeUnit.SECONDS);
     }
 
     @Override
@@ -51,7 +51,7 @@ public class XmAccessibilityService extends AccessibilityService {
         if (!XM_PACKAGE.contentEquals(event.getPackageName())) return;
         if (!isRunning()) return;
         handler.removeCallbacksAndMessages(null);
-        handler.postDelayed(this::inspectAndAct, 500);
+        handler.postDelayed(this::inspectAndAct, 450);
     }
 
     private void analyzeMarketSafe() {
@@ -89,6 +89,7 @@ public class XmAccessibilityService extends AccessibilityService {
 
         boolean demoCurrent = containsAny(joined, "demo", "practice", "virtual");
         boolean demoSeen = prefs().getBoolean("demo_seen", false) || demoCurrent;
+        boolean realDetected = containsAny(joined, "real account", "live account", "real hesab", "canlı hesab");
         boolean goldDetected = containsAny(joined, "xauusd", "xau/usd", "gold", "qızıl");
         boolean buyFound = hasContains(root, "buy") || hasExact(root, "al");
         boolean sellFound = hasContains(root, "sell") || hasExact(root, "sat");
@@ -103,7 +104,15 @@ public class XmAccessibilityService extends AccessibilityService {
                 .putString("screen_sample", sample)
                 .apply();
 
-        // 1) GOLD görünmürsə, əvvəlcə GOLD-a get. Navigasiya üçün DEMO şərti YOXDUR.
+        if (realDetected) {
+            prefs().edit()
+                    .putBoolean(MainActivity.KEY_RUNNING, false)
+                    .putString("nav_state", "REAL/LIVE hesab aşkarlandı — bot dayandırıldı")
+                    .putString("reason", "Bu versiya yalnız DEMO üçündür")
+                    .apply();
+            return;
+        }
+
         if (!goldDetected) {
             if (clickContains(root, "xauusd") || clickContains(root, "xau/usd") || clickContains(root, "gold")) {
                 prefs().edit().putString("nav_state", "GOLD nəticəsinə basıldı").apply();
@@ -116,7 +125,7 @@ public class XmAccessibilityService extends AccessibilityService {
                 args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "GOLD");
                 if (edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
                     prefs().edit().putString("nav_state", "Axtarışa GOLD yazıldı").apply();
-                    handler.postDelayed(this::inspectAndAct, 800);
+                    handler.postDelayed(this::inspectAndAct, 900);
                     return;
                 }
             }
@@ -130,18 +139,15 @@ public class XmAccessibilityService extends AccessibilityService {
                 prefs().edit().putString("nav_state", "Markets/Quotes açıldı").apply();
                 return;
             }
-
-            // Son ehtimal: Trade tabı alət siyahısını aça bilər.
             if (clickContains(root, "trade") || clickContains(root, "ticarət")) {
                 prefs().edit().putString("nav_state", "Trade bölməsinə keçildi").apply();
                 return;
             }
 
-            prefs().edit().putString("nav_state", "GOLD yolu tapılmadı — statusda ekran mətni saxlandı").apply();
+            prefs().edit().putString("nav_state", "GOLD yolu tapılmadı — statusu yoxla").apply();
             return;
         }
 
-        // 2) GOLD aktivdir, order ticketə keç.
         if (!buyFound && !sellFound) {
             if (clickContains(root, "trade") || clickContains(root, "new order") || clickContains(root, "order") ||
                     clickContains(root, "ticarət") || clickContains(root, "əmr")) {
@@ -152,9 +158,9 @@ public class XmAccessibilityService extends AccessibilityService {
             return;
         }
 
-        // 3) HARD SAFETY: order yalnız bu sessiyada DEMO göstəricisi ən azı bir dəfə görülübsə.
-        if (!demoSeen) {
-            prefs().edit().putString("nav_state", "GOLD hazırdır, amma DEMO təsdiqi görülməyib — trade bloklandı").apply();
+        boolean userConfirmedDemo = prefs().getBoolean("demo_user_confirmed", false);
+        if (!userConfirmedDemo) {
+            prefs().edit().putString("nav_state", "DEMO təsdiqi yoxdur — trade bloklandı").apply();
             return;
         }
 
@@ -162,33 +168,43 @@ public class XmAccessibilityService extends AccessibilityService {
         int count = p.getInt("trade_count", 0);
         long lastTrade = p.getLong("last_trade_time", 0L);
         long now = System.currentTimeMillis();
-        if (count >= MAX_TRADES) return;
-        if (now - lastTrade < COOLDOWN_MS) return;
 
-        String signal = p.getString("signal", "WAIT");
-        if (!"BUY".equals(signal) && !"SELL".equals(signal)) {
-            prefs().edit().putString("nav_state", "GOLD hazırdır, analiz WAIT verir").apply();
+        if (count >= MAX_TRADES) {
+            p.edit().putString("nav_state", "5/5 trade tamamlandı").apply();
+            return;
+        }
+        if (now - lastTrade < COOLDOWN_MS) {
+            long left = (COOLDOWN_MS - (now - lastTrade)) / 1000L;
+            p.edit().putString("nav_state", "Növbəti trade üçün " + left + " san gözlənilir").apply();
             return;
         }
 
-        // 4) Demo order cəhdi. Bir dəfə klikdən sonra say artırılır.
+        String signal = p.getString("signal", "WAIT");
+        if (!"BUY".equals(signal) && !"SELL".equals(signal)) {
+            p.edit().putString("nav_state", "GOLD hazırdır, analiz WAIT verir").apply();
+            return;
+        }
+
         boolean clicked = "BUY".equals(signal)
                 ? (clickContains(root, "buy") || clickExact(root, "al"))
                 : (clickContains(root, "sell") || clickExact(root, "sat"));
 
         if (clicked) {
+            int newCount = count + 1;
             p.edit()
-                    .putInt("trade_count", count + 1)
+                    .putInt("trade_count", newCount)
                     .putLong("last_trade_time", now)
-                    .putString("nav_state", "GOLD " + signal + " klikləndi")
+                    .putString("nav_state", "GOLD " + signal + " klikləndi — " + newCount + "/5")
                     .putString("reason", p.getString("reason", "") + " • DEMO GOLD " + signal + " klikləndi")
                     .apply();
-            handler.postDelayed(this::confirmIfVisible, 1000);
+            handler.postDelayed(this::confirmIfVisible, 900);
+        } else {
+            p.edit().putString("nav_state", signal + " düyməsi tapıldı, amma klik alınmadı").apply();
         }
     }
 
     private void confirmIfVisible() {
-        if (!isRunning() || !prefs().getBoolean("demo_seen", false)) return;
+        if (!isRunning() || !prefs().getBoolean("demo_user_confirmed", false)) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
         clickContains(root, "place order");
@@ -301,15 +317,14 @@ public class XmAccessibilityService extends AccessibilityService {
         double rsi = rsi(closes, 14);
         double move = avgAbsMove(closes, 14);
 
-        // Demo funksional test: trend istiqaməti həmişə BUY və ya SELL verir.
         String signal;
         String reason;
         if (e9 >= e21) {
             signal = "BUY";
-            reason = "DEMO test: GOLD qısa trend yuxarıdır (EMA9>=EMA21), RSI=" + String.format(Locale.US, "%.1f", rsi);
+            reason = "DEMO test: GOLD qısa trend yuxarıdır, RSI=" + String.format(Locale.US, "%.1f", rsi);
         } else {
             signal = "SELL";
-            reason = "DEMO test: GOLD qısa trend aşağıdır (EMA9<EMA21), RSI=" + String.format(Locale.US, "%.1f", rsi);
+            reason = "DEMO test: GOLD qısa trend aşağıdır, RSI=" + String.format(Locale.US, "%.1f", rsi);
         }
 
         double sl = signal.equals("SELL") ? last + move * 2.0 : last - move * 2.0;
@@ -347,8 +362,10 @@ public class XmAccessibilityService extends AccessibilityService {
         if (!prefs().getBoolean(MainActivity.KEY_RUNNING, false)) return false;
         long end = prefs().getLong("session_end", 0L);
         if (end > 0 && System.currentTimeMillis() >= end) {
-            prefs().edit().putBoolean(MainActivity.KEY_RUNNING, false)
-                    .putString("reason", "30 dəqiqəlik GOLD sessiyası bitdi")
+            prefs().edit()
+                    .putBoolean(MainActivity.KEY_RUNNING, false)
+                    .putString("reason", "10 dəqiqəlik GOLD sessiyası bitdi")
+                    .putString("nav_state", "Sessiya bitdi")
                     .apply();
             return false;
         }
@@ -364,10 +381,12 @@ public class XmAccessibilityService extends AccessibilityService {
     }
 
     private String safe(String s) {
-        return s == null ? "naməlum" : s.substring(0, Math.min(s.length(), 120));
+        if (s == null) return "naməlum";
+        return s.substring(0, Math.min(s.length(), 120));
     }
 
-    @Override public void onInterrupt() { }
+    @Override
+    public void onInterrupt() { }
 
     @Override
     public void onDestroy() {
