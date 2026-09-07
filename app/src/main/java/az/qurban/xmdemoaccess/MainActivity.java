@@ -29,14 +29,14 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.WHITE);
 
         TextView title = new TextView(this);
-        title.setText("XM DEMO AUTO TRADER");
-        title.setTextSize(25);
+        title.setText("XM GOLD DEMO AUTO TRADER");
+        title.setTextSize(24);
         title.setTextColor(Color.BLACK);
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("EUR/USD • 30 dəqiqə • DEMO ONLY");
+        sub.setText("GOLD / XAUUSD • 30 dəqiqə • DEMO ONLY");
         sub.setTextSize(16);
         sub.setTextColor(Color.rgb(200,120,0));
         sub.setGravity(Gravity.CENTER);
@@ -82,8 +82,9 @@ public class MainActivity extends Activity {
          .putLong("last_trade_time", 0L)
          .putInt("trade_count", 0)
          .putString("signal", "WAIT")
-         .putString("reason", "İlk analiz gözlənilir")
+         .putString("reason", "İlk qızıl analizi gözlənilir")
          .putBoolean("demo_detected", false)
+         .putBoolean("gold_detected", false)
          .apply();
 
         Intent launch = getPackageManager().getLaunchIntentForPackage("com.xm.webapp");
@@ -95,7 +96,7 @@ public class MainActivity extends Activity {
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(launch);
-        Toast.makeText(this, "30 dəqiqəlik DEMO test başladı.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "30 dəqiqəlik GOLD DEMO test başladı.", Toast.LENGTH_LONG).show();
     }
 
     private void stopSession() {
@@ -119,11 +120,12 @@ public class MainActivity extends Activity {
         String txt = "Status: " + (running ? "START" : "STOP") +
                 "\nQalan vaxt: " + min + " dəq " + sec + " san" +
                 "\n\nDEMO təsdiqi: " + (p.getBoolean("demo_detected", false) ? "HƏ" : "YOX") +
+                "\nGOLD/XAUUSD: " + (p.getBoolean("gold_detected", false) ? "HƏ" : "YOX") +
                 "\nBUY düyməsi: " + (p.getBoolean("buy_found", false) ? "HƏ" : "YOX") +
                 "\nSELL düyməsi: " + (p.getBoolean("sell_found", false) ? "HƏ" : "YOX") +
                 "\n\nSiqnal: " + p.getString("signal", "WAIT") +
                 "\nSəbəb: " + p.getString("reason", "-") +
-                "\nQiymət: " + p.getString("price", "-") +
+                "\nQızıl qiyməti: " + p.getString("price", "-") +
                 "\nSL: " + p.getString("sl", "-") +
                 "\nTP: " + p.getString("tp", "-") +
                 "\n\nTrade sayı: " + p.getInt("trade_count", 0) + " / 2" +
