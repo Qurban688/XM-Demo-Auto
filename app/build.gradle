@@ -10,7 +10,7 @@ android {
         applicationId "az.qurban.xmdemoaccess"
         minSdk 24
         targetSdk 35
-        versionCode 2
-        versionName "0.2-demo-auto"
+        versionCode 3
+        versionName "0.3-gold-demo-auto"
     }
 }
