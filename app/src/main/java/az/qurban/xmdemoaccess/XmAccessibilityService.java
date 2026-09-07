@@ -3,6 +3,7 @@ package az.qurban.xmdemoaccess;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.content.SharedPreferences;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.accessibility.AccessibilityEvent;
@@ -41,7 +42,7 @@ public class XmAccessibilityService extends AccessibilityService {
         setServiceInfo(info);
 
         scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(this::analyzeMarketSafe, 1, 60, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::analyzeMarketSafe, 1, 30, TimeUnit.SECONDS);
     }
 
     @Override
@@ -50,23 +51,15 @@ public class XmAccessibilityService extends AccessibilityService {
         if (!XM_PACKAGE.contentEquals(event.getPackageName())) return;
         if (!isRunning()) return;
         handler.removeCallbacksAndMessages(null);
-        handler.postDelayed(this::inspectAndAct, 350);
+        handler.postDelayed(this::inspectAndAct, 500);
     }
 
     private void analyzeMarketSafe() {
         if (!isRunning()) return;
-        long now = System.currentTimeMillis();
-        long end = prefs().getLong("session_end", 0L);
-        if (end > 0 && now >= end) {
-            prefs().edit().putBoolean(MainActivity.KEY_RUNNING, false)
-                    .putString("reason", "30 dəqiqəlik GOLD sessiyası bitdi")
-                    .apply();
-            return;
-        }
         try {
             Analysis a = fetchAndAnalyze();
-            SharedPreferences.Editor e = prefs().edit();
-            e.putString("signal", a.signal)
+            prefs().edit()
+                    .putString("signal", a.signal)
                     .putString("reason", a.reason)
                     .putString("price", String.format(Locale.US, "%.2f", a.price))
                     .putString("sl", String.format(Locale.US, "%.2f", a.sl))
@@ -75,7 +68,8 @@ public class XmAccessibilityService extends AccessibilityService {
                     .apply();
             handler.post(this::inspectAndAct);
         } catch (Exception ex) {
-            prefs().edit().putString("signal", "WAIT")
+            prefs().edit()
+                    .putString("signal", "WAIT")
                     .putString("reason", "Qızıl analiz xətası: " + safe(ex.getMessage()))
                     .apply();
         }
@@ -84,92 +78,156 @@ public class XmAccessibilityService extends AccessibilityService {
     private void inspectAndAct() {
         if (!isRunning()) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
-
-        List<String> texts = new ArrayList<>();
-        collectText(root, texts, 0);
-        String joined = String.join(" ", texts).toLowerCase(Locale.ROOT);
-
-        boolean demo = joined.contains("demo") || joined.contains("practice") || joined.contains("virtual");
-        boolean goldDetected = joined.contains("xauusd") || joined.contains("xau/usd") || joined.contains("gold") || joined.contains("qızıl");
-        boolean buyFound = hasExact(root, "buy") || hasExact(root, "al");
-        boolean sellFound = hasExact(root, "sell") || hasExact(root, "sat");
-
-        prefs().edit()
-                .putBoolean("demo_detected", demo)
-                .putBoolean("gold_detected", goldDetected)
-                .putBoolean("buy_found", buyFound)
-                .putBoolean("sell_found", sellFound)
-                .apply();
-
-        if (!demo) return; // HARD SAFETY: no click without current DEMO text on XM screen.
-
-        // Ensure GOLD/XAUUSD is the active instrument before any trade click.
-        if (!goldDetected) {
-            if (clickExact(root, "xauusd")) return;
-            if (clickExact(root, "xau/usd")) return;
-            if (clickExact(root, "gold")) return;
-            if (clickExact(root, "qızıl")) return;
-            if (clickExact(root, "metals")) return;
+        if (root == null) {
+            prefs().edit().putString("nav_state", "XM ekran ağacı alınmadı").apply();
             return;
         }
 
-        // Reach the trade ticket if needed.
+        List<String> texts = new ArrayList<>();
+        collectText(root, texts, 0);
+        String joined = String.join(" | ", texts).toLowerCase(Locale.ROOT);
+
+        boolean demoCurrent = containsAny(joined, "demo", "practice", "virtual");
+        boolean demoSeen = prefs().getBoolean("demo_seen", false) || demoCurrent;
+        boolean goldDetected = containsAny(joined, "xauusd", "xau/usd", "gold", "qızıl");
+        boolean buyFound = hasContains(root, "buy") || hasExact(root, "al");
+        boolean sellFound = hasContains(root, "sell") || hasExact(root, "sat");
+
+        String sample = joined.length() > 900 ? joined.substring(0, 900) : joined;
+        prefs().edit()
+                .putBoolean("demo_detected", demoCurrent)
+                .putBoolean("demo_seen", demoSeen)
+                .putBoolean("gold_detected", goldDetected)
+                .putBoolean("buy_found", buyFound)
+                .putBoolean("sell_found", sellFound)
+                .putString("screen_sample", sample)
+                .apply();
+
+        // 1) GOLD görünmürsə, əvvəlcə GOLD-a get. Navigasiya üçün DEMO şərti YOXDUR.
+        if (!goldDetected) {
+            if (clickContains(root, "xauusd") || clickContains(root, "xau/usd") || clickContains(root, "gold")) {
+                prefs().edit().putString("nav_state", "GOLD nəticəsinə basıldı").apply();
+                return;
+            }
+
+            AccessibilityNodeInfo edit = findEditable(root);
+            if (edit != null) {
+                Bundle args = new Bundle();
+                args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "GOLD");
+                if (edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                    prefs().edit().putString("nav_state", "Axtarışa GOLD yazıldı").apply();
+                    handler.postDelayed(this::inspectAndAct, 800);
+                    return;
+                }
+            }
+
+            if (clickContains(root, "search") || clickContains(root, "axtar") || clickContains(root, "find")) {
+                prefs().edit().putString("nav_state", "Search açıldı").apply();
+                return;
+            }
+            if (clickContains(root, "markets") || clickContains(root, "market") || clickContains(root, "quotes") ||
+                    clickContains(root, "instruments") || clickContains(root, "symbols") || clickContains(root, "alətlər")) {
+                prefs().edit().putString("nav_state", "Markets/Quotes açıldı").apply();
+                return;
+            }
+
+            // Son ehtimal: Trade tabı alət siyahısını aça bilər.
+            if (clickContains(root, "trade") || clickContains(root, "ticarət")) {
+                prefs().edit().putString("nav_state", "Trade bölməsinə keçildi").apply();
+                return;
+            }
+
+            prefs().edit().putString("nav_state", "GOLD yolu tapılmadı — statusda ekran mətni saxlandı").apply();
+            return;
+        }
+
+        // 2) GOLD aktivdir, order ticketə keç.
         if (!buyFound && !sellFound) {
-            if (clickExact(root, "trade")) return;
-            if (clickExact(root, "new order")) return;
-            if (clickExact(root, "order")) return;
+            if (clickContains(root, "trade") || clickContains(root, "new order") || clickContains(root, "order") ||
+                    clickContains(root, "ticarət") || clickContains(root, "əmr")) {
+                prefs().edit().putString("nav_state", "GOLD trade ticket açılır").apply();
+                return;
+            }
+            prefs().edit().putString("nav_state", "GOLD tapıldı, BUY/SELL gözlənilir").apply();
+            return;
+        }
+
+        // 3) HARD SAFETY: order yalnız bu sessiyada DEMO göstəricisi ən azı bir dəfə görülübsə.
+        if (!demoSeen) {
+            prefs().edit().putString("nav_state", "GOLD hazırdır, amma DEMO təsdiqi görülməyib — trade bloklandı").apply();
             return;
         }
 
         SharedPreferences p = prefs();
-        String signal = p.getString("signal", "WAIT");
         int count = p.getInt("trade_count", 0);
         long lastTrade = p.getLong("last_trade_time", 0L);
         long now = System.currentTimeMillis();
-
         if (count >= MAX_TRADES) return;
         if (now - lastTrade < COOLDOWN_MS) return;
-        if (!"BUY".equals(signal) && !"SELL".equals(signal)) return;
 
-        boolean clicked;
-        if ("BUY".equals(signal)) {
-            clicked = clickExact(root, "buy") || clickExact(root, "al");
-        } else {
-            clicked = clickExact(root, "sell") || clickExact(root, "sat");
+        String signal = p.getString("signal", "WAIT");
+        if (!"BUY".equals(signal) && !"SELL".equals(signal)) {
+            prefs().edit().putString("nav_state", "GOLD hazırdır, analiz WAIT verir").apply();
+            return;
         }
 
+        // 4) Demo order cəhdi. Bir dəfə klikdən sonra say artırılır.
+        boolean clicked = "BUY".equals(signal)
+                ? (clickContains(root, "buy") || clickExact(root, "al"))
+                : (clickContains(root, "sell") || clickExact(root, "sat"));
+
         if (clicked) {
-            p.edit().putInt("trade_count", count + 1)
+            p.edit()
+                    .putInt("trade_count", count + 1)
                     .putLong("last_trade_time", now)
-                    .putString("reason", p.getString("reason", "") + " • GOLD " + signal + " klikləndi")
+                    .putString("nav_state", "GOLD " + signal + " klikləndi")
+                    .putString("reason", p.getString("reason", "") + " • DEMO GOLD " + signal + " klikləndi")
                     .apply();
-            handler.postDelayed(this::confirmIfVisible, 900);
+            handler.postDelayed(this::confirmIfVisible, 1000);
         }
     }
 
     private void confirmIfVisible() {
-        if (!isRunning()) return;
+        if (!isRunning() || !prefs().getBoolean("demo_seen", false)) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
-        clickExact(root, "confirm");
-        clickExact(root, "place order");
-        clickExact(root, "submit");
-        clickExact(root, "təsdiq et");
-        clickExact(root, "sifariş ver");
+        clickContains(root, "place order");
+        clickContains(root, "confirm");
+        clickContains(root, "submit");
+        clickContains(root, "təsdiq");
+        clickContains(root, "sifariş ver");
+    }
+
+    private boolean containsAny(String s, String... needles) {
+        for (String n : needles) if (s.contains(n)) return true;
+        return false;
     }
 
     private boolean hasExact(AccessibilityNodeInfo root, String target) {
         return findExact(root, target) != null;
     }
 
+    private boolean hasContains(AccessibilityNodeInfo root, String target) {
+        return findContains(root, target) != null;
+    }
+
     private boolean clickExact(AccessibilityNodeInfo root, String target) {
-        AccessibilityNodeInfo n = findExact(root, target);
+        return clickNode(findExact(root, target));
+    }
+
+    private boolean clickContains(AccessibilityNodeInfo root, String target) {
+        return clickNode(findContains(root, target));
+    }
+
+    private boolean clickNode(AccessibilityNodeInfo n) {
         if (n == null) return false;
         AccessibilityNodeInfo c = n;
-        while (c != null && !c.isClickable()) c = c.getParent();
-        if (c != null && c.isClickable()) return c.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-        return false;
+        int up = 0;
+        while (c != null && !c.isClickable() && up < 6) {
+            c = c.getParent();
+            up++;
+        }
+        return c != null && c.isClickable() && c.performAction(AccessibilityNodeInfo.ACTION_CLICK);
     }
 
     private AccessibilityNodeInfo findExact(AccessibilityNodeInfo node, String target) {
@@ -178,8 +236,29 @@ public class XmAccessibilityService extends AccessibilityService {
         String d = norm(node.getContentDescription());
         if (target.equals(t) || target.equals(d)) return node;
         for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            AccessibilityNodeInfo found = findExact(child, target);
+            AccessibilityNodeInfo found = findExact(node.getChild(i), target);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private AccessibilityNodeInfo findContains(AccessibilityNodeInfo node, String target) {
+        if (node == null) return null;
+        String t = norm(node.getText());
+        String d = norm(node.getContentDescription());
+        if (t.contains(target) || d.contains(target)) return node;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo found = findContains(node.getChild(i), target);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private AccessibilityNodeInfo findEditable(AccessibilityNodeInfo node) {
+        if (node == null) return null;
+        if (node.isEditable() || "android.widget.EditText".contentEquals(node.getClassName())) return node;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo found = findEditable(node.getChild(i));
             if (found != null) return found;
         }
         return null;
@@ -191,19 +270,17 @@ public class XmAccessibilityService extends AccessibilityService {
         CharSequence d = node.getContentDescription();
         if (t != null && t.length() > 0) out.add(t.toString());
         if (d != null && d.length() > 0) out.add(d.toString());
-        for (int i = 0; i < node.getChildCount(); i++) {
-            collectText(node.getChild(i), out, depth + 1);
-        }
+        for (int i = 0; i < node.getChildCount(); i++) collectText(node.getChild(i), out, depth + 1);
     }
 
     private Analysis fetchAndAnalyze() throws Exception {
-        // GC=F is COMEX Gold futures; used here as a public demo-market proxy for GOLD/XAUUSD direction.
         String endpoint = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=5m";
         HttpURLConnection c = (HttpURLConnection) new URL(endpoint).openConnection();
         c.setConnectTimeout(12000);
         c.setReadTimeout(12000);
         c.setRequestProperty("User-Agent", "Mozilla/5.0");
-        if (c.getResponseCode() != 200) throw new Exception("Market HTTP " + c.getResponseCode());
+        int code = c.getResponseCode();
+        if (code != 200) throw new Exception("Market HTTP " + code);
 
         BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream()));
         StringBuilder sb = new StringBuilder();
@@ -224,14 +301,15 @@ public class XmAccessibilityService extends AccessibilityService {
         double rsi = rsi(closes, 14);
         double move = avgAbsMove(closes, 14);
 
-        String signal = "WAIT";
-        String reason = "GOLD siqnalı zəifdir";
-        if (e9 > e21 && rsi >= 53 && rsi <= 67 && last > e9) {
+        // Demo funksional test: trend istiqaməti həmişə BUY və ya SELL verir.
+        String signal;
+        String reason;
+        if (e9 >= e21) {
             signal = "BUY";
-            reason = "GOLD EMA9>EMA21, RSI yüksəlişi təsdiqləyir";
-        } else if (e9 < e21 && rsi >= 33 && rsi <= 47 && last < e9) {
+            reason = "DEMO test: GOLD qısa trend yuxarıdır (EMA9>=EMA21), RSI=" + String.format(Locale.US, "%.1f", rsi);
+        } else {
             signal = "SELL";
-            reason = "GOLD EMA9<EMA21, RSI enişi təsdiqləyir";
+            reason = "DEMO test: GOLD qısa trend aşağıdır (EMA9<EMA21), RSI=" + String.format(Locale.US, "%.1f", rsi);
         }
 
         double sl = signal.equals("SELL") ? last + move * 2.0 : last - move * 2.0;
@@ -289,8 +367,7 @@ public class XmAccessibilityService extends AccessibilityService {
         return s == null ? "naməlum" : s.substring(0, Math.min(s.length(), 120));
     }
 
-    @Override
-    public void onInterrupt() { }
+    @Override public void onInterrupt() { }
 
     @Override
     public void onDestroy() {
