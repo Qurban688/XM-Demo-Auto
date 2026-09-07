@@ -10,6 +10,7 @@ import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -22,14 +23,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(22), dp(28), dp(22), dp(22));
+        root.setPadding(dp(22), dp(26), dp(22), dp(22));
         root.setBackgroundColor(Color.WHITE);
+        scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("XM GOLD DEMO AUTO TRADER");
+        title.setText("XM GOLD DEMO AUTO v4");
         title.setTextSize(24);
         title.setTextColor(Color.BLACK);
         title.setGravity(Gravity.CENTER);
@@ -41,14 +45,14 @@ public class MainActivity extends Activity {
         sub.setTextColor(Color.rgb(200,120,0));
         sub.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams sp1 = fullWrap();
-        sp1.setMargins(0, dp(6), 0, dp(20));
+        sp1.setMargins(0, dp(6), 0, dp(18));
         root.addView(sub, sp1);
 
         Button access = makeButton("ACCESSIBILITY İCAZƏSİ", Color.rgb(75,75,75));
         access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(access);
 
-        Button start = makeButton("START — 30 DƏQİQƏ", Color.rgb(20,160,70));
+        Button start = makeButton("START — GOLD 30 DƏQİQƏ", Color.rgb(20,160,70));
         start.setOnClickListener(v -> startSession());
         root.addView(start);
 
@@ -61,7 +65,7 @@ public class MainActivity extends Activity {
         root.addView(stop);
 
         status = new TextView(this);
-        status.setTextSize(15);
+        status.setTextSize(14);
         status.setTextColor(Color.BLACK);
         status.setGravity(Gravity.LEFT);
         status.setPadding(dp(10), dp(16), dp(10), dp(16));
@@ -69,23 +73,28 @@ public class MainActivity extends Activity {
         sp.setMargins(0, dp(12), 0, 0);
         root.addView(status, sp);
 
-        setContentView(root);
+        setContentView(scroll);
         refreshStatus();
     }
 
     private void startSession() {
         long now = System.currentTimeMillis();
-        SharedPreferences.Editor e = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
-        e.putBoolean(KEY_RUNNING, true)
-         .putLong("session_start", now)
-         .putLong("session_end", now + SESSION_MS)
-         .putLong("last_trade_time", 0L)
-         .putInt("trade_count", 0)
-         .putString("signal", "WAIT")
-         .putString("reason", "İlk qızıl analizi gözlənilir")
-         .putBoolean("demo_detected", false)
-         .putBoolean("gold_detected", false)
-         .apply();
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean(KEY_RUNNING, true)
+                .putLong("session_start", now)
+                .putLong("session_end", now + SESSION_MS)
+                .putLong("last_trade_time", 0L)
+                .putInt("trade_count", 0)
+                .putString("signal", "WAIT")
+                .putString("reason", "İlk GOLD analizi gözlənilir")
+                .putString("nav_state", "XM açılır")
+                .putBoolean("demo_detected", false)
+                .putBoolean("demo_seen", false)
+                .putBoolean("gold_detected", false)
+                .putBoolean("buy_found", false)
+                .putBoolean("sell_found", false)
+                .putString("screen_sample", "")
+                .apply();
 
         Intent launch = getPackageManager().getLaunchIntentForPackage("com.xm.webapp");
         if (launch == null) {
@@ -96,13 +105,14 @@ public class MainActivity extends Activity {
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(launch);
-        Toast.makeText(this, "30 dəqiqəlik GOLD DEMO test başladı.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "GOLD DEMO bot başladı.", Toast.LENGTH_LONG).show();
     }
 
     private void stopSession() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putBoolean(KEY_RUNNING, false)
                 .putString("reason", "İstifadəçi STOP basdı")
+                .putString("nav_state", "STOP")
                 .apply();
         Toast.makeText(this, "Bot dayandırıldı.", Toast.LENGTH_SHORT).show();
         refreshStatus();
@@ -119,7 +129,9 @@ public class MainActivity extends Activity {
 
         String txt = "Status: " + (running ? "START" : "STOP") +
                 "\nQalan vaxt: " + min + " dəq " + sec + " san" +
-                "\n\nDEMO təsdiqi: " + (p.getBoolean("demo_detected", false) ? "HƏ" : "YOX") +
+                "\n\nNaviqasiya: " + p.getString("nav_state", "-") +
+                "\nDEMO bu ekranda: " + (p.getBoolean("demo_detected", false) ? "HƏ" : "YOX") +
+                "\nDEMO sessiyada görüldü: " + (p.getBoolean("demo_seen", false) ? "HƏ" : "YOX") +
                 "\nGOLD/XAUUSD: " + (p.getBoolean("gold_detected", false) ? "HƏ" : "YOX") +
                 "\nBUY düyməsi: " + (p.getBoolean("buy_found", false) ? "HƏ" : "YOX") +
                 "\nSELL düyməsi: " + (p.getBoolean("sell_found", false) ? "HƏ" : "YOX") +
@@ -129,7 +141,8 @@ public class MainActivity extends Activity {
                 "\nSL: " + p.getString("sl", "-") +
                 "\nTP: " + p.getString("tp", "-") +
                 "\n\nTrade sayı: " + p.getInt("trade_count", 0) + " / 2" +
-                "\nSon analiz: " + p.getString("last_analysis", "yoxdur");
+                "\nSon analiz: " + p.getString("last_analysis", "yoxdur") +
+                "\n\nXM-dən oxunan mətn:\n" + p.getString("screen_sample", "-");
         status.setText(txt);
     }
 
