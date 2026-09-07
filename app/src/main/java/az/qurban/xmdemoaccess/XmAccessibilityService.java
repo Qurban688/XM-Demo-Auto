@@ -59,7 +59,7 @@ public class XmAccessibilityService extends AccessibilityService {
         long end = prefs().getLong("session_end", 0L);
         if (end > 0 && now >= end) {
             prefs().edit().putBoolean(MainActivity.KEY_RUNNING, false)
-                    .putString("reason", "30 dəqiqəlik sessiya bitdi")
+                    .putString("reason", "30 dəqiqəlik GOLD sessiyası bitdi")
                     .apply();
             return;
         }
@@ -68,15 +68,15 @@ public class XmAccessibilityService extends AccessibilityService {
             SharedPreferences.Editor e = prefs().edit();
             e.putString("signal", a.signal)
                     .putString("reason", a.reason)
-                    .putString("price", String.format(Locale.US, "%.5f", a.price))
-                    .putString("sl", String.format(Locale.US, "%.5f", a.sl))
-                    .putString("tp", String.format(Locale.US, "%.5f", a.tp))
+                    .putString("price", String.format(Locale.US, "%.2f", a.price))
+                    .putString("sl", String.format(Locale.US, "%.2f", a.sl))
+                    .putString("tp", String.format(Locale.US, "%.2f", a.tp))
                     .putString("last_analysis", new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()))
                     .apply();
             handler.post(this::inspectAndAct);
         } catch (Exception ex) {
             prefs().edit().putString("signal", "WAIT")
-                    .putString("reason", "Analiz xətası: " + safe(ex.getMessage()))
+                    .putString("reason", "Qızıl analiz xətası: " + safe(ex.getMessage()))
                     .apply();
         }
     }
@@ -91,22 +91,34 @@ public class XmAccessibilityService extends AccessibilityService {
         String joined = String.join(" ", texts).toLowerCase(Locale.ROOT);
 
         boolean demo = joined.contains("demo") || joined.contains("practice") || joined.contains("virtual");
+        boolean goldDetected = joined.contains("xauusd") || joined.contains("xau/usd") || joined.contains("gold") || joined.contains("qızıl");
         boolean buyFound = hasExact(root, "buy") || hasExact(root, "al");
         boolean sellFound = hasExact(root, "sell") || hasExact(root, "sat");
 
         prefs().edit()
                 .putBoolean("demo_detected", demo)
+                .putBoolean("gold_detected", goldDetected)
                 .putBoolean("buy_found", buyFound)
                 .putBoolean("sell_found", sellFound)
                 .apply();
 
         if (!demo) return; // HARD SAFETY: no click without current DEMO text on XM screen.
 
-        // Try to reach EURUSD trade screen if BUY/SELL are not visible yet.
+        // Ensure GOLD/XAUUSD is the active instrument before any trade click.
+        if (!goldDetected) {
+            if (clickExact(root, "xauusd")) return;
+            if (clickExact(root, "xau/usd")) return;
+            if (clickExact(root, "gold")) return;
+            if (clickExact(root, "qızıl")) return;
+            if (clickExact(root, "metals")) return;
+            return;
+        }
+
+        // Reach the trade ticket if needed.
         if (!buyFound && !sellFound) {
-            if (clickExact(root, "eurusd")) return;
             if (clickExact(root, "trade")) return;
             if (clickExact(root, "new order")) return;
+            if (clickExact(root, "order")) return;
             return;
         }
 
@@ -130,7 +142,7 @@ public class XmAccessibilityService extends AccessibilityService {
         if (clicked) {
             p.edit().putInt("trade_count", count + 1)
                     .putLong("last_trade_time", now)
-                    .putString("reason", p.getString("reason", "") + " • " + signal + " klikləndi")
+                    .putString("reason", p.getString("reason", "") + " • GOLD " + signal + " klikləndi")
                     .apply();
             handler.postDelayed(this::confirmIfVisible, 900);
         }
@@ -140,7 +152,6 @@ public class XmAccessibilityService extends AccessibilityService {
         if (!isRunning()) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
-        // Only confirmation labels; never click BUY/SELL a second time here.
         clickExact(root, "confirm");
         clickExact(root, "place order");
         clickExact(root, "submit");
@@ -186,7 +197,8 @@ public class XmAccessibilityService extends AccessibilityService {
     }
 
     private Analysis fetchAndAnalyze() throws Exception {
-        String endpoint = "https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?range=5d&interval=5m";
+        // GC=F is COMEX Gold futures; used here as a public demo-market proxy for GOLD/XAUUSD direction.
+        String endpoint = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=5d&interval=5m";
         HttpURLConnection c = (HttpURLConnection) new URL(endpoint).openConnection();
         c.setConnectTimeout(12000);
         c.setReadTimeout(12000);
@@ -204,7 +216,7 @@ public class XmAccessibilityService extends AccessibilityService {
         JSONArray arr = result.getJSONObject("indicators").getJSONArray("quote").getJSONObject(0).getJSONArray("close");
         List<Double> closes = new ArrayList<>();
         for (int i = 0; i < arr.length(); i++) if (!arr.isNull(i)) closes.add(arr.getDouble(i));
-        if (closes.size() < 60) throw new Exception("Qiymət məlumatı azdır");
+        if (closes.size() < 60) throw new Exception("Qızıl qiymət məlumatı azdır");
 
         double last = closes.get(closes.size() - 1);
         double e9 = ema(closes, 9);
@@ -213,13 +225,13 @@ public class XmAccessibilityService extends AccessibilityService {
         double move = avgAbsMove(closes, 14);
 
         String signal = "WAIT";
-        String reason = "Siqnal zəifdir";
+        String reason = "GOLD siqnalı zəifdir";
         if (e9 > e21 && rsi >= 53 && rsi <= 67 && last > e9) {
             signal = "BUY";
-            reason = "EMA9>EMA21, RSI yüksəlişi təsdiqləyir";
+            reason = "GOLD EMA9>EMA21, RSI yüksəlişi təsdiqləyir";
         } else if (e9 < e21 && rsi >= 33 && rsi <= 47 && last < e9) {
             signal = "SELL";
-            reason = "EMA9<EMA21, RSI enişi təsdiqləyir";
+            reason = "GOLD EMA9<EMA21, RSI enişi təsdiqləyir";
         }
 
         double sl = signal.equals("SELL") ? last + move * 2.0 : last - move * 2.0;
@@ -250,7 +262,7 @@ public class XmAccessibilityService extends AccessibilityService {
     private double avgAbsMove(List<Double> v, int p) {
         double s = 0;
         for (int i = v.size() - p; i < v.size(); i++) s += Math.abs(v.get(i) - v.get(i - 1));
-        return Math.max(s / p, 0.00012);
+        return Math.max(s / p, 0.10);
     }
 
     private boolean isRunning() {
@@ -258,7 +270,7 @@ public class XmAccessibilityService extends AccessibilityService {
         long end = prefs().getLong("session_end", 0L);
         if (end > 0 && System.currentTimeMillis() >= end) {
             prefs().edit().putBoolean(MainActivity.KEY_RUNNING, false)
-                    .putString("reason", "30 dəqiqəlik sessiya bitdi")
+                    .putString("reason", "30 dəqiqəlik GOLD sessiyası bitdi")
                     .apply();
             return false;
         }
