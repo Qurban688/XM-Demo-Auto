@@ -17,7 +17,8 @@ import android.widget.Toast;
 public class MainActivity extends Activity {
     public static final String PREFS = "xm_demo_prefs";
     public static final String KEY_RUNNING = "running";
-    public static final long SESSION_MS = 30L * 60L * 1000L;
+    public static final long SESSION_MS = 10L * 60L * 1000L;
+    public static final int MAX_TRADES = 5;
     private TextView status;
 
     @Override
@@ -33,14 +34,14 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("XM GOLD DEMO AUTO v4");
+        title.setText("XM GOLD DEMO AUTO v5");
         title.setTextSize(24);
         title.setTextColor(Color.BLACK);
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("GOLD / XAUUSD • 30 dəqiqə • DEMO ONLY");
+        sub.setText("GOLD / XAUUSD • 10 dəqiqə • maksimum 5 DEMO trade");
         sub.setTextSize(16);
         sub.setTextColor(Color.rgb(200,120,0));
         sub.setGravity(Gravity.CENTER);
@@ -52,7 +53,7 @@ public class MainActivity extends Activity {
         access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(access);
 
-        Button start = makeButton("START — GOLD 30 DƏQİQƏ", Color.rgb(20,160,70));
+        Button start = makeButton("START — GOLD 10 DƏQ / 5 TRADE", Color.rgb(20,160,70));
         start.setOnClickListener(v -> startSession());
         root.addView(start);
 
@@ -81,6 +82,7 @@ public class MainActivity extends Activity {
         long now = System.currentTimeMillis();
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putBoolean(KEY_RUNNING, true)
+                .putBoolean("demo_user_confirmed", true)
                 .putLong("session_start", now)
                 .putLong("session_end", now + SESSION_MS)
                 .putLong("last_trade_time", 0L)
@@ -105,7 +107,7 @@ public class MainActivity extends Activity {
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(launch);
-        Toast.makeText(this, "GOLD DEMO bot başladı.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "10 dəqiqəlik GOLD DEMO test başladı.", Toast.LENGTH_LONG).show();
     }
 
     private void stopSession() {
@@ -140,7 +142,7 @@ public class MainActivity extends Activity {
                 "\nQızıl qiyməti: " + p.getString("price", "-") +
                 "\nSL: " + p.getString("sl", "-") +
                 "\nTP: " + p.getString("tp", "-") +
-                "\n\nTrade sayı: " + p.getInt("trade_count", 0) + " / 2" +
+                "\n\nTrade sayı: " + p.getInt("trade_count", 0) + " / " + MAX_TRADES +
                 "\nSon analiz: " + p.getString("last_analysis", "yoxdur") +
                 "\n\nXM-dən oxunan mətn:\n" + p.getString("screen_sample", "-");
         status.setText(txt);
@@ -159,7 +161,7 @@ public class MainActivity extends Activity {
     private Button makeButton(String text, int color) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextSize(18);
+        b.setTextSize(17);
         b.setTextColor(Color.WHITE);
         b.setBackgroundColor(color);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62));
