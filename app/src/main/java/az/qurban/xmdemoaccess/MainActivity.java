@@ -34,20 +34,29 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("XM GOLD DEMO AUTO v5");
+        title.setText("XM GOLD DEMO AUTO v6");
         title.setTextSize(24);
         title.setTextColor(Color.BLACK);
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("GOLD / XAUUSD • 10 dəqiqə • maksimum 5 DEMO trade");
+        sub.setText("GOLD • 10 dəqiqə • maksimum 5 DEMO trade");
         sub.setTextSize(16);
         sub.setTextColor(Color.rgb(200,120,0));
         sub.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams sp1 = fullWrap();
-        sp1.setMargins(0, dp(6), 0, dp(18));
+        sp1.setMargins(0, dp(6), 0, dp(12));
         root.addView(sub, sp1);
+
+        TextView note = new TextView(this);
+        note.setText("START basmaqla XM-də hazırda DEMO hesabın açıq olduğunu təsdiqləyirsən. REAL/LIVE yazısı aşkarlanarsa bot dayanır.");
+        note.setTextSize(14);
+        note.setTextColor(Color.DKGRAY);
+        note.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams np = fullWrap();
+        np.setMargins(0, 0, 0, dp(16));
+        root.addView(note, np);
 
         Button access = makeButton("ACCESSIBILITY İCAZƏSİ", Color.rgb(75,75,75));
         access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
@@ -87,14 +96,18 @@ public class MainActivity extends Activity {
                 .putLong("session_end", now + SESSION_MS)
                 .putLong("last_trade_time", 0L)
                 .putInt("trade_count", 0)
+                .putString("pending_signal", "")
+                .putLong("pending_since", 0L)
                 .putString("signal", "WAIT")
                 .putString("reason", "İlk GOLD analizi gözlənilir")
                 .putString("nav_state", "XM açılır")
                 .putBoolean("demo_detected", false)
                 .putBoolean("demo_seen", false)
                 .putBoolean("gold_detected", false)
+                .putBoolean("gold_selected_by_bot", false)
                 .putBoolean("buy_found", false)
                 .putBoolean("sell_found", false)
+                .putInt("gesture_stage", 0)
                 .putString("screen_sample", "")
                 .apply();
 
@@ -107,12 +120,13 @@ public class MainActivity extends Activity {
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(launch);
-        Toast.makeText(this, "10 dəqiqəlik GOLD DEMO test başladı.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "GOLD DEMO bot başladı. XM-i açıq saxla.", Toast.LENGTH_LONG).show();
     }
 
     private void stopSession() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putBoolean(KEY_RUNNING, false)
+                .putString("pending_signal", "")
                 .putString("reason", "İstifadəçi STOP basdı")
                 .putString("nav_state", "STOP")
                 .apply();
@@ -133,8 +147,8 @@ public class MainActivity extends Activity {
                 "\nQalan vaxt: " + min + " dəq " + sec + " san" +
                 "\n\nNaviqasiya: " + p.getString("nav_state", "-") +
                 "\nDEMO bu ekranda: " + (p.getBoolean("demo_detected", false) ? "HƏ" : "YOX") +
-                "\nDEMO sessiyada görüldü: " + (p.getBoolean("demo_seen", false) ? "HƏ" : "YOX") +
-                "\nGOLD/XAUUSD: " + (p.getBoolean("gold_detected", false) ? "HƏ" : "YOX") +
+                "\nGOLD mətni: " + (p.getBoolean("gold_detected", false) ? "HƏ" : "YOX") +
+                "\nGOLD seçildi: " + (p.getBoolean("gold_selected_by_bot", false) ? "HƏ" : "YOX") +
                 "\nBUY düyməsi: " + (p.getBoolean("buy_found", false) ? "HƏ" : "YOX") +
                 "\nSELL düyməsi: " + (p.getBoolean("sell_found", false) ? "HƏ" : "YOX") +
                 "\n\nSiqnal: " + p.getString("signal", "WAIT") +
@@ -142,7 +156,7 @@ public class MainActivity extends Activity {
                 "\nQızıl qiyməti: " + p.getString("price", "-") +
                 "\nSL: " + p.getString("sl", "-") +
                 "\nTP: " + p.getString("tp", "-") +
-                "\n\nTrade sayı: " + p.getInt("trade_count", 0) + " / " + MAX_TRADES +
+                "\n\nTrade cəhdi: " + p.getInt("trade_count", 0) + " / " + MAX_TRADES +
                 "\nSon analiz: " + p.getString("last_analysis", "yoxdur") +
                 "\n\nXM-dən oxunan mətn:\n" + p.getString("screen_sample", "-");
         status.setText(txt);
