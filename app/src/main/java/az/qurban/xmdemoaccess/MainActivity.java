@@ -34,15 +34,15 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("XM GOLD DEMO AUTO v6");
+        title.setText("XM GOLD DEMO AUTO v7");
         title.setTextSize(24);
         title.setTextColor(Color.BLACK);
         title.setGravity(Gravity.CENTER);
         root.addView(title, fullWrap());
 
         TextView sub = new TextView(this);
-        sub.setText("GOLD • 10 dəqiqə • maksimum 5 DEMO trade");
-        sub.setTextSize(16);
+        sub.setText("Sənin XM ekranına uyğun • GOLD • 10 dəqiqə • 5 DEMO trade");
+        sub.setTextSize(15);
         sub.setTextColor(Color.rgb(200,120,0));
         sub.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams sp1 = fullWrap();
@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
         root.addView(sub, sp1);
 
         TextView note = new TextView(this);
-        note.setText("START basmaqla XM-də hazırda DEMO hesabın açıq olduğunu təsdiqləyirsən. REAL/LIVE yazısı aşkarlanarsa bot dayanır.");
+        note.setText("START basanda proqram Home → Markets → GOLD yolunu sənin göndərdiyin ekran yerlərinə görə özü gedir. Yalnız DEMO üçün.");
         note.setTextSize(14);
         note.setTextColor(Color.DKGRAY);
         note.setGravity(Gravity.CENTER);
@@ -100,14 +100,14 @@ public class MainActivity extends Activity {
                 .putLong("pending_since", 0L)
                 .putString("signal", "WAIT")
                 .putString("reason", "İlk GOLD analizi gözlənilir")
+                .putInt("nav_phase", 0)
+                .putLong("nav_phase_at", now)
                 .putString("nav_state", "XM açılır")
                 .putBoolean("demo_detected", false)
-                .putBoolean("demo_seen", false)
                 .putBoolean("gold_detected", false)
                 .putBoolean("gold_selected_by_bot", false)
                 .putBoolean("buy_found", false)
                 .putBoolean("sell_found", false)
-                .putInt("gesture_stage", 0)
                 .putString("screen_sample", "")
                 .apply();
 
@@ -120,7 +120,7 @@ public class MainActivity extends Activity {
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(launch);
-        Toast.makeText(this, "GOLD DEMO bot başladı. XM-i açıq saxla.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "v7 başladı. XM-i açıq saxla və telefona toxunma.", Toast.LENGTH_LONG).show();
     }
 
     private void stopSession() {
@@ -145,12 +145,12 @@ public class MainActivity extends Activity {
 
         String txt = "Status: " + (running ? "START" : "STOP") +
                 "\nQalan vaxt: " + min + " dəq " + sec + " san" +
-                "\n\nNaviqasiya: " + p.getString("nav_state", "-") +
-                "\nDEMO bu ekranda: " + (p.getBoolean("demo_detected", false) ? "HƏ" : "YOX") +
+                "\nMərhələ: " + p.getInt("nav_phase", 0) +
+                "\nNaviqasiya: " + p.getString("nav_state", "-") +
+                "\nDEMO mətni: " + (p.getBoolean("demo_detected", false) ? "HƏ" : "YOX") +
                 "\nGOLD mətni: " + (p.getBoolean("gold_detected", false) ? "HƏ" : "YOX") +
-                "\nGOLD seçildi: " + (p.getBoolean("gold_selected_by_bot", false) ? "HƏ" : "YOX") +
-                "\nBUY düyməsi: " + (p.getBoolean("buy_found", false) ? "HƏ" : "YOX") +
-                "\nSELL düyməsi: " + (p.getBoolean("sell_found", false) ? "HƏ" : "YOX") +
+                "\nBUY: " + (p.getBoolean("buy_found", false) ? "HƏ" : "YOX") +
+                "\nSELL: " + (p.getBoolean("sell_found", false) ? "HƏ" : "YOX") +
                 "\n\nSiqnal: " + p.getString("signal", "WAIT") +
                 "\nSəbəb: " + p.getString("reason", "-") +
                 "\nQızıl qiyməti: " + p.getString("price", "-") +
