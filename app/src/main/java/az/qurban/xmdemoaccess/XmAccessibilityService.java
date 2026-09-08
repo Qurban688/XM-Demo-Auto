@@ -7,6 +7,8 @@ import android.content.SharedPreferences;
 import android.graphics.Path;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.DisplayMetrics;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -29,7 +31,9 @@ import java.util.concurrent.TimeUnit;
 public class XmAccessibilityService extends AccessibilityService {
     private static final String XM_PACKAGE = "com.xm.webapp";
     private static final long COOLDOWN_MS = 90L * 1000L;
-    private static final int MAX_TRADES = 5;
+    private static final int MAX_ATTEMPTS = 5;
+    private static final float BASE_W = 720f;
+    private static final float BASE_H = 1600f;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ScheduledExecutorService scheduler;
@@ -39,7 +43,7 @@ public class XmAccessibilityService extends AccessibilityService {
             try {
                 if (isRunning()) inspectAndAct();
             } finally {
-                handler.postDelayed(this, 650L);
+                handler.postDelayed(this, 500L);
             }
         }
     };
@@ -71,35 +75,36 @@ public class XmAccessibilityService extends AccessibilityService {
     private void inspectAndAct() {
         if (!isRunning()) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) {
-            prefs().edit().putString("nav_state", "XM ekranı gözlənilir").apply();
+        if (root == null || root.getPackageName() == null || !XM_PACKAGE.contentEquals(root.getPackageName())) {
+            prefs().edit().putBoolean("xm_active", false).apply();
             return;
         }
 
+        prefs().edit().putBoolean("xm_active", true).apply();
         String joined = collectJoinedText(root);
         boolean demoText = containsAny(joined, "demo", "practice", "virtual");
         boolean realText = containsAny(joined, "real account", "live account", "real hesab", "canlı hesab");
         boolean goldText = containsAny(joined, "gold", "xauusd", "xau/usd");
-        boolean buyText = containsAny(joined, "buy");
-        boolean sellText = containsAny(joined, "sell");
+        boolean buyText = joined.contains("buy");
+        boolean sellText = joined.contains("sell");
 
         prefs().edit()
                 .putBoolean("demo_detected", demoText)
+                .putBoolean("demo_seen", prefs().getBoolean("demo_seen", false) || demoText)
                 .putBoolean("gold_detected", goldText)
                 .putBoolean("buy_found", buyText)
                 .putBoolean("sell_found", sellText)
-                .putString("screen_sample", joined.length() > 900 ? joined.substring(0, 900) : joined)
+                .putString("screen_sample", joined.length() > 1000 ? joined.substring(0, 1000) : joined)
                 .apply();
 
         if (realText) {
             prefs().edit()
                     .putBoolean(MainActivity.KEY_RUNNING, false)
-                    .putString("nav_state", "REAL/LIVE aşkarlandı — dayandırıldı")
-                    .putString("reason", "Bu versiya yalnız DEMO üçündür")
+                    .putString("nav_state", "REAL/LIVE aşkarlandı — STOP")
+                    .putString("reason", "Bu APK yalnız DEMO üçündür")
                     .apply();
             return;
         }
-
         if (!prefs().getBoolean("demo_user_confirmed", false)) return;
 
         long now = System.currentTimeMillis();
@@ -107,64 +112,68 @@ public class XmAccessibilityService extends AccessibilityService {
         long phaseAt = prefs().getLong("nav_phase_at", prefs().getLong("session_start", now));
         long age = now - phaseAt;
 
-        // User screenshots: 720x1600. Percent taps make this scale to the same layout.
-        // 0: force Home first so every run starts from a known screen.
-        if (phase == 0 && age >= 2200L) {
-            tapPct(0.10f, 0.945f); // Home bottom-left
-            setPhase(1, "Home seçildi");
+        // Sənin SS-lərin: 720x1600. Bütün fallback toxunuşlar bu koordinatlardan real ekran ölçüsünə miqyaslanır.
+        // Home/istənilən XM ekranı -> Markets alt menyusu.
+        if (phase == 0 && age >= 1800L) {
+            boolean ok = clickContains(root, "markets");
+            if (!ok) ok = tapBase(215f, 1510f);
+            if (ok) setPhase(1, "Markets basıldı");
             return;
         }
 
-        // 1: Home -> Markets (bottom second icon)
-        if (phase == 1 && age >= 1400L) {
-            tapPct(0.30f, 0.945f); // Markets
-            setPhase(2, "Markets seçildi");
+        // Markets/Popular -> birinci GOLD sətri.
+        if (phase == 1 && age >= 1500L) {
+            boolean ok = clickContains(root, "gold");
+            if (!ok) ok = tapBase(155f, 410f);
+            if (ok) setPhase(2, "GOLD sətri basıldı");
             return;
         }
 
-        // 2: GOLD is the first row in user's current Markets/Popular screen.
-        if (phase == 2 && age >= 1600L) {
-            tapPct(0.25f, 0.247f); // GOLD first row
-            setPhase(3, "GOLD sətrinə basıldı");
+        // GOLD chartın açılmasını gözlə.
+        if (phase == 2) {
+            if (goldText || buyText || sellText || age >= 2300L) {
+                setPhase(3, goldText ? "GOLD trade ekranı hazırdır" : "GOLD ekranı açıldı — koordinat rejimi");
+            }
             return;
         }
 
-        // 3: GOLD chart opens and bottom Trade tab becomes selected.
-        if (phase == 3 && age >= 2200L) {
-            prefs().edit()
-                    .putBoolean("gold_selected_by_bot", true)
-                    .putInt("nav_phase", 4)
-                    .putLong("nav_phase_at", now)
-                    .putString("nav_state", goldText ? "GOLD trade ekranı hazırdır" : "GOLD trade ekranı qəbul edildi")
-                    .apply();
-            return;
-        }
+        if (phase < 3) return;
 
-        if (phase < 4) return;
-
-        // Pending click: many XM layouts execute directly; if a confirmation button appears, press it.
         String pending = prefs().getString("pending_signal", "");
         long pendingSince = prefs().getLong("pending_since", 0L);
         if (!pending.isEmpty()) {
             if (clickAnyText(root, "confirm", "place order", "submit", "open position", "execute", "təsdiq", "sifariş ver")) {
-                finalizeTrade(pending, "təsdiq düyməsi basıldı");
+                prefs().edit().putString("nav_state", "Order təsdiqi basıldı").apply();
                 return;
             }
-            if (now - pendingSince >= 2600L) {
-                finalizeTrade(pending, "BUY/SELL klik cəhdi tamamlandı");
+
+            boolean confirmed = containsAny(joined,
+                    "position opened", "order placed", "order executed", "successfully opened",
+                    "position is open", "open position", "successful", "uğurla");
+            if (confirmed) {
+                confirmTrade(pending, "XM əməliyyatı təsdiqlədi");
+                return;
+            }
+
+            if (now - pendingSince >= 3500L) {
+                prefs().edit()
+                        .putString("pending_signal", "")
+                        .putLong("pending_since", 0L)
+                        .putString("nav_state", pending + " toxunuşu göndərildi, amma XM təsdiqi görünmədi")
+                        .apply();
             }
             return;
         }
 
-        int count = prefs().getInt("trade_count", 0);
-        if (count >= MAX_TRADES) {
-            prefs().edit().putBoolean(MainActivity.KEY_RUNNING, false).putString("nav_state", "5/5 trade cəhdi tamamlandı").apply();
+        int attempts = prefs().getInt("attempt_count", 0);
+        if (attempts >= MAX_ATTEMPTS) {
+            prefs().edit().putBoolean(MainActivity.KEY_RUNNING, false).putString("nav_state", "5/5 toxunuş cəhdi bitdi").apply();
             return;
         }
 
-        long lastTrade = prefs().getLong("last_trade_time", 0L);
-        if (lastTrade > 0 && now - lastTrade < COOLDOWN_MS) {
-            long left = (COOLDOWN_MS - (now - lastTrade)) / 1000L;
+        long lastAttempt = prefs().getLong("last_attempt_time", 0L);
+        if (lastAttempt > 0 && now - lastAttempt < COOLDOWN_MS) {
+            long left = Math.max(0L, (COOLDOWN_MS - (now - lastAttempt)) / 1000L);
             prefs().edit().putString("nav_state", "Növbəti trade üçün " + left + " san").apply();
             return;
         }
@@ -175,23 +184,26 @@ public class XmAccessibilityService extends AccessibilityService {
             return;
         }
 
-        boolean clicked = false;
+        boolean clicked;
         if ("BUY".equals(signal)) {
             clicked = clickContains(root, "buy");
-            if (!clicked) clicked = tapPct(0.735f, 0.827f); // exact BUY center from screenshot
+            if (!clicked) clicked = tapBase(530f, 1320f); // sənin SS-də yaşıl BUY mərkəzi
         } else {
             clicked = clickContains(root, "sell");
-            if (!clicked) clicked = tapPct(0.265f, 0.827f); // exact SELL center from screenshot
+            if (!clicked) clicked = tapBase(190f, 1320f); // sənin SS-də qırmızı SELL mərkəzi
         }
 
         if (clicked) {
+            int newAttempts = attempts + 1;
             prefs().edit()
+                    .putInt("attempt_count", newAttempts)
+                    .putLong("last_attempt_time", now)
                     .putString("pending_signal", signal)
                     .putLong("pending_since", now)
-                    .putString("nav_state", "GOLD " + signal + " basıldı")
+                    .putString("nav_state", "GOLD " + signal + " toxunuşu göndərildi — cəhd " + newAttempts + "/5")
                     .apply();
         } else {
-            prefs().edit().putString("nav_state", signal + " klik alınmadı").apply();
+            prefs().edit().putString("nav_state", signal + " toxunuşu göndərilə bilmədi").apply();
         }
     }
 
@@ -208,10 +220,7 @@ public class XmAccessibilityService extends AccessibilityService {
                     .putString("last_analysis", new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()))
                     .apply();
         } catch (Exception ex) {
-            prefs().edit()
-                    .putString("signal", "WAIT")
-                    .putString("reason", "Qızıl analiz xətası: " + safe(ex.getMessage()))
-                    .apply();
+            prefs().edit().putString("signal", "WAIT").putString("reason", "Qızıl analiz xətası: " + safe(ex.getMessage())).apply();
         }
     }
 
@@ -242,7 +251,6 @@ public class XmAccessibilityService extends AccessibilityService {
         double e21 = ema(closes, 21);
         double rsi = rsi(closes, 14);
         double move = avgAbsMove(closes, 14);
-
         String signal = e9 >= e21 ? "BUY" : "SELL";
         String reason = signal + " • GOLD EMA9/EMA21 trend • RSI=" + String.format(Locale.US, "%.1f", rsi);
         double sl = signal.equals("SELL") ? last + move * 2.0 : last - move * 2.0;
@@ -250,14 +258,13 @@ public class XmAccessibilityService extends AccessibilityService {
         return new Analysis(signal, reason, last, sl, tp);
     }
 
-    private void finalizeTrade(String signal, String note) {
-        int newCount = Math.min(MAX_TRADES, prefs().getInt("trade_count", 0) + 1);
+    private void confirmTrade(String signal, String note) {
+        int n = Math.min(MAX_ATTEMPTS, prefs().getInt("confirmed_trade_count", 0) + 1);
         prefs().edit()
-                .putInt("trade_count", newCount)
-                .putLong("last_trade_time", System.currentTimeMillis())
+                .putInt("confirmed_trade_count", n)
                 .putString("pending_signal", "")
                 .putLong("pending_since", 0L)
-                .putString("nav_state", "GOLD " + signal + " — " + newCount + "/5")
+                .putString("nav_state", "TƏSDİQLƏNDİ: GOLD " + signal + " — " + n + " trade")
                 .putString("reason", prefs().getString("reason", "") + " • " + note)
                 .apply();
     }
@@ -266,13 +273,17 @@ public class XmAccessibilityService extends AccessibilityService {
         prefs().edit().putInt("nav_phase", phase).putLong("nav_phase_at", System.currentTimeMillis()).putString("nav_state", state).apply();
     }
 
-    private boolean tapPct(float xPct, float yPct) {
-        int w = getResources().getDisplayMetrics().widthPixels;
-        int h = getResources().getDisplayMetrics().heightPixels;
+    private boolean tapBase(float baseX, float baseY) {
+        DisplayMetrics dm = new DisplayMetrics();
+        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        if (wm == null) return false;
+        wm.getDefaultDisplay().getRealMetrics(dm);
+        float x = baseX * dm.widthPixels / BASE_W;
+        float y = baseY * dm.heightPixels / BASE_H;
         Path path = new Path();
-        path.moveTo(w * xPct, h * yPct);
+        path.moveTo(x, y);
         GestureDescription.Builder b = new GestureDescription.Builder();
-        b.addStroke(new GestureDescription.StrokeDescription(path, 0, 80));
+        b.addStroke(new GestureDescription.StrokeDescription(path, 0, 90));
         return dispatchGesture(b.build(), null, null);
     }
 
