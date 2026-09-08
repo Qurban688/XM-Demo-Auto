@@ -2,7 +2,10 @@ package az.qurban.xmdemoaccess;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.accessibilityservice.GestureDescription;
 import android.content.SharedPreferences;
+import android.graphics.Path;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -29,9 +32,21 @@ public class XmAccessibilityService extends AccessibilityService {
     private static final String XM_PACKAGE = "com.xm.webapp";
     private static final long COOLDOWN_MS = 90L * 1000L;
     private static final int MAX_TRADES = 5;
+    private static final long NAV_GAP_MS = 1200L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ScheduledExecutorService scheduler;
+    private long lastNavAction = 0L;
+
+    private final Runnable uiLoop = new Runnable() {
+        @Override public void run() {
+            try {
+                if (isRunning()) inspectAndAct();
+            } finally {
+                handler.postDelayed(this, 1200L);
+            }
+        }
+    };
 
     @Override
     protected void onServiceConnected() {
@@ -39,7 +54,11 @@ public class XmAccessibilityService extends AccessibilityService {
         AccessibilityServiceInfo info = getServiceInfo();
         info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;
         info.flags |= AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
+        info.flags |= AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
         setServiceInfo(info);
+
+        handler.removeCallbacks(uiLoop);
+        handler.postDelayed(uiLoop, 700L);
 
         scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.scheduleAtFixedRate(this::analyzeMarketSafe, 1, 20, TimeUnit.SECONDS);
@@ -50,8 +69,7 @@ public class XmAccessibilityService extends AccessibilityService {
         if (event == null || event.getPackageName() == null) return;
         if (!XM_PACKAGE.contentEquals(event.getPackageName())) return;
         if (!isRunning()) return;
-        handler.removeCallbacksAndMessages(null);
-        handler.postDelayed(this::inspectAndAct, 450);
+        handler.postDelayed(this::inspectAndAct, 250L);
     }
 
     private void analyzeMarketSafe() {
@@ -66,7 +84,6 @@ public class XmAccessibilityService extends AccessibilityService {
                     .putString("tp", String.format(Locale.US, "%.2f", a.tp))
                     .putString("last_analysis", new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date()))
                     .apply();
-            handler.post(this::inspectAndAct);
         } catch (Exception ex) {
             prefs().edit()
                     .putString("signal", "WAIT")
@@ -78,27 +95,27 @@ public class XmAccessibilityService extends AccessibilityService {
     private void inspectAndAct() {
         if (!isRunning()) return;
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) {
-            prefs().edit().putString("nav_state", "XM ekran ağacı alınmadı").apply();
+        if (root == null || root.getPackageName() == null || !XM_PACKAGE.contentEquals(root.getPackageName())) {
+            prefs().edit().putString("nav_state", "XM aktiv ekran gözlənilir").apply();
             return;
         }
 
         List<String> texts = new ArrayList<>();
         collectText(root, texts, 0);
         String joined = String.join(" | ", texts).toLowerCase(Locale.ROOT);
+        String sample = joined.length() > 1200 ? joined.substring(0, 1200) : joined;
 
         boolean demoCurrent = containsAny(joined, "demo", "practice", "virtual");
-        boolean demoSeen = prefs().getBoolean("demo_seen", false) || demoCurrent;
         boolean realDetected = containsAny(joined, "real account", "live account", "real hesab", "canlı hesab");
-        boolean goldDetected = containsAny(joined, "xauusd", "xau/usd", "gold", "qızıl");
+        boolean goldText = containsAny(joined, "xauusd", "xau/usd", "gold", "qızıl");
         boolean buyFound = hasContains(root, "buy") || hasExact(root, "al");
         boolean sellFound = hasContains(root, "sell") || hasExact(root, "sat");
+        boolean searchContext = containsAny(joined, "search", "axtar", "find") || findEditable(root) != null;
 
-        String sample = joined.length() > 900 ? joined.substring(0, 900) : joined;
         prefs().edit()
                 .putBoolean("demo_detected", demoCurrent)
-                .putBoolean("demo_seen", demoSeen)
-                .putBoolean("gold_detected", goldDetected)
+                .putBoolean("demo_seen", prefs().getBoolean("demo_seen", false) || demoCurrent)
+                .putBoolean("gold_detected", goldText)
                 .putBoolean("buy_found", buyFound)
                 .putBoolean("sell_found", sellFound)
                 .putString("screen_sample", sample)
@@ -107,150 +124,351 @@ public class XmAccessibilityService extends AccessibilityService {
         if (realDetected) {
             prefs().edit()
                     .putBoolean(MainActivity.KEY_RUNNING, false)
-                    .putString("nav_state", "REAL/LIVE hesab aşkarlandı — bot dayandırıldı")
-                    .putString("reason", "Bu versiya yalnız DEMO üçündür")
+                    .putString("nav_state", "REAL/LIVE hesab aşkarlandı — dayandırıldı")
+                    .putString("reason", "Bu APK yalnız DEMO üçündür")
                     .apply();
             return;
         }
 
-        if (!goldDetected) {
-            if (clickContains(root, "xauusd") || clickContains(root, "xau/usd") || clickContains(root, "gold")) {
-                prefs().edit().putString("nav_state", "GOLD nəticəsinə basıldı").apply();
+        if (!prefs().getBoolean("demo_user_confirmed", false)) {
+            prefs().edit().putString("nav_state", "DEMO təsdiqi yoxdur").apply();
+            return;
+        }
+
+        // Pending order confirmation stage.
+        String pending = prefs().getString("pending_signal", "");
+        long pendingSince = prefs().getLong("pending_since", 0L);
+        if (!pending.isEmpty()) {
+            if (confirmPending(root, joined, pending, pendingSince)) return;
+        }
+
+        boolean goldSelected = prefs().getBoolean("gold_selected_by_bot", false);
+
+        // If search results are visible, choose the actual GOLD row instead of mistaking the search text for active symbol.
+        if (goldText && searchContext && !goldSelected) {
+            if (clickContainsBelow(root, "xauusd", 0.16f) || clickContainsBelow(root, "xau/usd", 0.16f) || clickContainsBelow(root, "gold", 0.16f)) {
+                prefs().edit().putBoolean("gold_selected_by_bot", true).putString("nav_state", "GOLD nəticəsi seçildi").apply();
+                markNavAction();
                 return;
             }
+        }
 
-            AccessibilityNodeInfo edit = findEditable(root);
-            if (edit != null) {
-                Bundle args = new Bundle();
-                args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "GOLD");
-                if (edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                    prefs().edit().putString("nav_state", "Axtarışa GOLD yazıldı").apply();
-                    handler.postDelayed(this::inspectAndAct, 900);
-                    return;
-                }
-            }
+        // Active GOLD screen: either BUY/SELL are present, or bot already selected GOLD.
+        if ((goldText && (buyFound || sellFound)) || goldSelected) {
+            prefs().edit().putBoolean("gold_selected_by_bot", true).apply();
+            if (handleGoldTradeScreen(root, joined, buyFound, sellFound)) return;
+        }
 
-            if (clickContains(root, "search") || clickContains(root, "axtar") || clickContains(root, "find")) {
-                prefs().edit().putString("nav_state", "Search açıldı").apply();
-                return;
-            }
-            if (clickContains(root, "markets") || clickContains(root, "market") || clickContains(root, "quotes") ||
-                    clickContains(root, "instruments") || clickContains(root, "symbols") || clickContains(root, "alətlər")) {
-                prefs().edit().putString("nav_state", "Markets/Quotes açıldı").apply();
+        // Text-based navigation first.
+        if (!tooSoon()) {
+            if (clickContains(root, "markets") || clickExact(root, "market") || clickContains(root, "quotes")) {
+                prefs().edit().putString("nav_state", "Markets açıldı").apply();
+                markNavAction();
                 return;
             }
             if (clickContains(root, "trade") || clickContains(root, "ticarət")) {
-                prefs().edit().putString("nav_state", "Trade bölməsinə keçildi").apply();
+                prefs().edit().putString("nav_state", "Trade bölməsi açıldı").apply();
+                markNavAction();
                 return;
             }
+            if (clickContains(root, "search") || clickContains(root, "axtar") || clickContains(root, "find")) {
+                prefs().edit().putString("nav_state", "Search açıldı").apply();
+                markNavAction();
+                return;
+            }
+        }
 
-            prefs().edit().putString("nav_state", "GOLD yolu tapılmadı — statusu yoxla").apply();
-            return;
+        AccessibilityNodeInfo edit = findEditable(root);
+        if (edit != null && !tooSoon()) {
+            Bundle args = new Bundle();
+            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "GOLD");
+            if (edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                prefs().edit().putString("nav_state", "Search sahəsinə GOLD yazıldı").apply();
+                markNavAction();
+                return;
+            }
+        }
+
+        if (goldText && !goldSelected && !tooSoon()) {
+            if (clickContainsBelow(root, "xauusd", 0.12f) || clickContainsBelow(root, "gold", 0.12f)) {
+                prefs().edit().putBoolean("gold_selected_by_bot", true).putString("nav_state", "GOLD seçildi").apply();
+                markNavAction();
+                return;
+            }
+        }
+
+        // Gesture fallback for the new XM UI / WebView where labels may not be exposed.
+        if (!tooSoon()) runGestureFallback(joined);
+    }
+
+    private boolean handleGoldTradeScreen(AccessibilityNodeInfo root, String joined, boolean buyFound, boolean sellFound) {
+        SharedPreferences p = prefs();
+        int count = p.getInt("trade_count", 0);
+        if (count >= MAX_TRADES) {
+            p.edit().putString("nav_state", "5/5 demo trade tamamlandı").apply();
+            return true;
         }
 
         if (!buyFound && !sellFound) {
-            if (clickContains(root, "trade") || clickContains(root, "new order") || clickContains(root, "order") ||
-                    clickContains(root, "ticarət") || clickContains(root, "əmr")) {
-                prefs().edit().putString("nav_state", "GOLD trade ticket açılır").apply();
-                return;
+            if (!tooSoon() && (clickContains(root, "trade") || clickContains(root, "new order") || clickContains(root, "order") || clickContains(root, "ticarət"))) {
+                p.edit().putString("nav_state", "GOLD order ekranı açılır").apply();
+                markNavAction();
+                return true;
             }
-            prefs().edit().putString("nav_state", "GOLD tapıldı, BUY/SELL gözlənilir").apply();
-            return;
+            if (!tooSoon()) {
+                // On current XM versions the instrument page commonly has a large trade action near the lower area.
+                tapPct(0.50f, 0.84f);
+                p.edit().putString("nav_state", "GOLD trade düyməsinə gesture cəhdi").apply();
+                markNavAction();
+                return true;
+            }
+            return false;
         }
 
-        boolean userConfirmedDemo = prefs().getBoolean("demo_user_confirmed", false);
-        if (!userConfirmedDemo) {
-            prefs().edit().putString("nav_state", "DEMO təsdiqi yoxdur — trade bloklandı").apply();
-            return;
-        }
-
-        SharedPreferences p = prefs();
-        int count = p.getInt("trade_count", 0);
         long lastTrade = p.getLong("last_trade_time", 0L);
         long now = System.currentTimeMillis();
-
-        if (count >= MAX_TRADES) {
-            p.edit().putString("nav_state", "5/5 trade tamamlandı").apply();
-            return;
-        }
         if (now - lastTrade < COOLDOWN_MS) {
-            long left = (COOLDOWN_MS - (now - lastTrade)) / 1000L;
-            p.edit().putString("nav_state", "Növbəti trade üçün " + left + " san gözlənilir").apply();
-            return;
+            long left = Math.max(0L, (COOLDOWN_MS - (now - lastTrade)) / 1000L);
+            p.edit().putString("nav_state", "Növbəti trade üçün " + left + " san").apply();
+            return true;
         }
 
         String signal = p.getString("signal", "WAIT");
         if (!"BUY".equals(signal) && !"SELL".equals(signal)) {
             p.edit().putString("nav_state", "GOLD hazırdır, analiz WAIT verir").apply();
+            return true;
+        }
+
+        boolean clicked;
+        if ("BUY".equals(signal)) clicked = clickBestTradeButton(root, true);
+        else clicked = clickBestTradeButton(root, false);
+
+        if (!clicked) {
+            ClickPair pair = findLargeTradePair(root);
+            if (pair != null) {
+                AccessibilityNodeInfo target = "BUY".equals(signal) ? pair.right : pair.left;
+                clicked = clickNode(target) || tapNodeCenter(target);
+            }
+        }
+
+        if (clicked) {
+            p.edit()
+                    .putString("pending_signal", signal)
+                    .putLong("pending_since", now)
+                    .putString("nav_state", "GOLD " + signal + " basıldı, order təsdiqi yoxlanır")
+                    .apply();
+            markNavAction();
+            return true;
+        }
+
+        p.edit().putString("nav_state", signal + " düyməsi görünür, klik alınmadı").apply();
+        return true;
+    }
+
+    private boolean confirmPending(AccessibilityNodeInfo root, String joined, String pending, long pendingSince) {
+        SharedPreferences p = prefs();
+        long age = System.currentTimeMillis() - pendingSince;
+
+        if (age < 500L) return true;
+
+        String[] confirmations = new String[]{"place order", "confirm", "submit", "təsdiq", "sifariş ver", "open position", "execute"};
+        for (String c : confirmations) {
+            if (clickContains(root, c)) {
+                finalizeTradeAttempt(pending, "order təsdiqi klikləndi");
+                return true;
+            }
+        }
+
+        boolean orderTicket = containsAny(joined, "volume", "lot", "lots", "stop loss", "take profit", "market execution", "order type", "əmr", "həcm");
+        if (orderTicket && age > 700L) {
+            boolean clicked = "BUY".equals(pending) ? clickBestTradeButton(root, true) : clickBestTradeButton(root, false);
+            if (clicked) {
+                finalizeTradeAttempt(pending, "order ticketdə " + pending + " təsdiqləndi");
+                return true;
+            }
+        }
+
+        // One-click trading may execute immediately and keep the same chart visible.
+        if (age > 2200L) {
+            finalizeTradeAttempt(pending, "one-click/ilk klik nəticəsi qəbul edildi");
+            return true;
+        }
+        return true;
+    }
+
+    private void finalizeTradeAttempt(String signal, String note) {
+        SharedPreferences p = prefs();
+        int newCount = Math.min(MAX_TRADES, p.getInt("trade_count", 0) + 1);
+        p.edit()
+                .putInt("trade_count", newCount)
+                .putLong("last_trade_time", System.currentTimeMillis())
+                .putString("pending_signal", "")
+                .putLong("pending_since", 0L)
+                .putString("nav_state", "GOLD " + signal + " cəhdi tamamlandı — " + newCount + "/5")
+                .putString("reason", p.getString("reason", "") + " • " + note)
+                .apply();
+    }
+
+    private void runGestureFallback(String joined) {
+        SharedPreferences p = prefs();
+        int stage = p.getInt("gesture_stage", 0);
+
+        // Try all bottom-navigation slots because the August 2026 XM update changed the bottom layout.
+        if (stage < 5) {
+            float x = 0.10f + 0.20f * stage;
+            tapPct(x, 0.92f);
+            p.edit().putInt("gesture_stage", stage + 1).putString("nav_state", "Alt menyu " + (stage + 1) + "/5 yoxlanır").apply();
+            markNavAction();
             return;
         }
 
-        boolean clicked = "BUY".equals(signal)
-                ? (clickContains(root, "buy") || clickExact(root, "al"))
-                : (clickContains(root, "sell") || clickExact(root, "sat"));
+        if (stage == 5) {
+            tapPct(0.90f, 0.085f);
+            p.edit().putInt("gesture_stage", 6).putString("nav_state", "Yuxarı Search ikonuna gesture").apply();
+            markNavAction();
+            return;
+        }
 
-        if (clicked) {
-            int newCount = count + 1;
-            p.edit()
-                    .putInt("trade_count", newCount)
-                    .putLong("last_trade_time", now)
-                    .putString("nav_state", "GOLD " + signal + " klikləndi — " + newCount + "/5")
-                    .putString("reason", p.getString("reason", "") + " • DEMO GOLD " + signal + " klikləndi")
-                    .apply();
-            handler.postDelayed(this::confirmIfVisible, 900);
-        } else {
-            p.edit().putString("nav_state", signal + " düyməsi tapıldı, amma klik alınmadı").apply();
+        if (stage == 6) {
+            tapPct(0.22f, 0.09f);
+            p.edit().putInt("gesture_stage", 7).putString("nav_state", "Trade ekranında alət seçicisinə gesture").apply();
+            markNavAction();
+            return;
+        }
+
+        if (stage == 7) {
+            tapPct(0.90f, 0.12f);
+            p.edit().putInt("gesture_stage", 0).putString("nav_state", "Search fallback yenidən yoxlanır").apply();
+            markNavAction();
         }
     }
 
-    private void confirmIfVisible() {
-        if (!isRunning() || !prefs().getBoolean("demo_user_confirmed", false)) return;
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) return;
-        clickContains(root, "place order");
-        clickContains(root, "confirm");
-        clickContains(root, "submit");
-        clickContains(root, "təsdiq");
-        clickContains(root, "sifariş ver");
+    private boolean clickBestTradeButton(AccessibilityNodeInfo root, boolean buy) {
+        String target = buy ? "buy" : "sell";
+        AccessibilityNodeInfo n = findLowestContains(root, target);
+        if (n == null) n = findExact(root, buy ? "al" : "sat");
+        return clickNode(n) || tapNodeCenter(n);
     }
+
+    private ClickPair findLargeTradePair(AccessibilityNodeInfo root) {
+        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+        collectClickable(root, nodes, 0);
+        int w = getResources().getDisplayMetrics().widthPixels;
+        int h = getResources().getDisplayMetrics().heightPixels;
+        AccessibilityNodeInfo left = null, right = null;
+        int bestY = -1;
+
+        for (AccessibilityNodeInfo a : nodes) {
+            Rect ra = new Rect(); a.getBoundsInScreen(ra);
+            if (ra.width() < w * 0.20f || ra.height() < h * 0.045f || ra.centerY() < h * 0.45f) continue;
+            for (AccessibilityNodeInfo b : nodes) {
+                if (a == b) continue;
+                Rect rb = new Rect(); b.getBoundsInScreen(rb);
+                if (rb.width() < w * 0.20f || rb.height() < h * 0.045f) continue;
+                if (Math.abs(ra.centerY() - rb.centerY()) > h * 0.06f) continue;
+                AccessibilityNodeInfo l = ra.centerX() < rb.centerX() ? a : b;
+                AccessibilityNodeInfo r = ra.centerX() < rb.centerX() ? b : a;
+                Rect rl = new Rect(); l.getBoundsInScreen(rl);
+                Rect rr = new Rect(); r.getBoundsInScreen(rr);
+                if (rl.centerX() < w * 0.48f && rr.centerX() > w * 0.52f && rl.centerY() > bestY) {
+                    left = l; right = r; bestY = rl.centerY();
+                }
+            }
+        }
+        return left != null && right != null ? new ClickPair(left, right) : null;
+    }
+
+    private boolean clickContainsBelow(AccessibilityNodeInfo root, String target, float minYFrac) {
+        AccessibilityNodeInfo n = findContainsBelow(root, target, minYFrac);
+        return clickNode(n) || tapNodeCenter(n);
+    }
+
+    private AccessibilityNodeInfo findContainsBelow(AccessibilityNodeInfo node, String target, float minYFrac) {
+        if (node == null) return null;
+        Rect r = new Rect(); node.getBoundsInScreen(r);
+        int h = getResources().getDisplayMetrics().heightPixels;
+        String t = norm(node.getText());
+        String d = norm(node.getContentDescription());
+        if ((t.contains(target) || d.contains(target)) && r.centerY() >= h * minYFrac && !node.isEditable()) return node;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo found = findContainsBelow(node.getChild(i), target, minYFrac);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private AccessibilityNodeInfo findLowestContains(AccessibilityNodeInfo root, String target) {
+        List<AccessibilityNodeInfo> matches = new ArrayList<>();
+        collectContains(root, target, matches, 0);
+        AccessibilityNodeInfo best = null;
+        int bestY = -1;
+        for (AccessibilityNodeInfo n : matches) {
+            Rect r = new Rect(); n.getBoundsInScreen(r);
+            if (r.centerY() > bestY) { best = n; bestY = r.centerY(); }
+        }
+        return best;
+    }
+
+    private void collectContains(AccessibilityNodeInfo node, String target, List<AccessibilityNodeInfo> out, int depth) {
+        if (node == null || depth > 40) return;
+        if (norm(node.getText()).contains(target) || norm(node.getContentDescription()).contains(target)) out.add(node);
+        for (int i = 0; i < node.getChildCount(); i++) collectContains(node.getChild(i), target, out, depth + 1);
+    }
+
+    private void collectClickable(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out, int depth) {
+        if (node == null || depth > 40) return;
+        if (node.isClickable()) out.add(node);
+        for (int i = 0; i < node.getChildCount(); i++) collectClickable(node.getChild(i), out, depth + 1);
+    }
+
+    private boolean tapNodeCenter(AccessibilityNodeInfo n) {
+        if (n == null) return false;
+        Rect r = new Rect(); n.getBoundsInScreen(r);
+        if (r.isEmpty()) return false;
+        return tapPx(r.centerX(), r.centerY());
+    }
+
+    private boolean tapPct(float xf, float yf) {
+        int w = getResources().getDisplayMetrics().widthPixels;
+        int h = getResources().getDisplayMetrics().heightPixels;
+        return tapPx(w * xf, h * yf);
+    }
+
+    private boolean tapPx(float x, float y) {
+        Path path = new Path();
+        path.moveTo(x, y);
+        GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 80);
+        GestureDescription gesture = new GestureDescription.Builder().addStroke(stroke).build();
+        return dispatchGesture(gesture, null, null);
+    }
+
+    private boolean tooSoon() {
+        return System.currentTimeMillis() - lastNavAction < NAV_GAP_MS;
+    }
+
+    private void markNavAction() { lastNavAction = System.currentTimeMillis(); }
 
     private boolean containsAny(String s, String... needles) {
         for (String n : needles) if (s.contains(n)) return true;
         return false;
     }
 
-    private boolean hasExact(AccessibilityNodeInfo root, String target) {
-        return findExact(root, target) != null;
-    }
-
-    private boolean hasContains(AccessibilityNodeInfo root, String target) {
-        return findContains(root, target) != null;
-    }
-
-    private boolean clickExact(AccessibilityNodeInfo root, String target) {
-        return clickNode(findExact(root, target));
-    }
-
-    private boolean clickContains(AccessibilityNodeInfo root, String target) {
-        return clickNode(findContains(root, target));
-    }
+    private boolean hasExact(AccessibilityNodeInfo root, String target) { return findExact(root, target) != null; }
+    private boolean hasContains(AccessibilityNodeInfo root, String target) { return findContains(root, target) != null; }
+    private boolean clickExact(AccessibilityNodeInfo root, String target) { return clickNode(findExact(root, target)); }
+    private boolean clickContains(AccessibilityNodeInfo root, String target) { return clickNode(findContains(root, target)); }
 
     private boolean clickNode(AccessibilityNodeInfo n) {
         if (n == null) return false;
         AccessibilityNodeInfo c = n;
         int up = 0;
-        while (c != null && !c.isClickable() && up < 6) {
-            c = c.getParent();
-            up++;
-        }
+        while (c != null && !c.isClickable() && up < 7) { c = c.getParent(); up++; }
         return c != null && c.isClickable() && c.performAction(AccessibilityNodeInfo.ACTION_CLICK);
     }
 
     private AccessibilityNodeInfo findExact(AccessibilityNodeInfo node, String target) {
         if (node == null) return null;
-        String t = norm(node.getText());
-        String d = norm(node.getContentDescription());
-        if (target.equals(t) || target.equals(d)) return node;
+        if (target.equals(norm(node.getText())) || target.equals(norm(node.getContentDescription()))) return node;
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo found = findExact(node.getChild(i), target);
             if (found != null) return found;
@@ -260,9 +478,7 @@ public class XmAccessibilityService extends AccessibilityService {
 
     private AccessibilityNodeInfo findContains(AccessibilityNodeInfo node, String target) {
         if (node == null) return null;
-        String t = norm(node.getText());
-        String d = norm(node.getContentDescription());
-        if (t.contains(target) || d.contains(target)) return node;
+        if (norm(node.getText()).contains(target) || norm(node.getContentDescription()).contains(target)) return node;
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo found = findContains(node.getChild(i), target);
             if (found != null) return found;
@@ -281,7 +497,7 @@ public class XmAccessibilityService extends AccessibilityService {
     }
 
     private void collectText(AccessibilityNodeInfo node, List<String> out, int depth) {
-        if (node == null || depth > 35) return;
+        if (node == null || depth > 40) return;
         CharSequence t = node.getText();
         CharSequence d = node.getContentDescription();
         if (t != null && t.length() > 0) out.add(t.toString());
@@ -321,10 +537,10 @@ public class XmAccessibilityService extends AccessibilityService {
         String reason;
         if (e9 >= e21) {
             signal = "BUY";
-            reason = "DEMO test: GOLD qısa trend yuxarıdır, RSI=" + String.format(Locale.US, "%.1f", rsi);
+            reason = "DEMO test: GOLD trend yuxarıdır, RSI=" + String.format(Locale.US, "%.1f", rsi);
         } else {
             signal = "SELL";
-            reason = "DEMO test: GOLD qısa trend aşağıdır, RSI=" + String.format(Locale.US, "%.1f", rsi);
+            reason = "DEMO test: GOLD trend aşağıdır, RSI=" + String.format(Locale.US, "%.1f", rsi);
         }
 
         double sl = signal.equals("SELL") ? last + move * 2.0 : last - move * 2.0;
@@ -362,34 +578,24 @@ public class XmAccessibilityService extends AccessibilityService {
         if (!prefs().getBoolean(MainActivity.KEY_RUNNING, false)) return false;
         long end = prefs().getLong("session_end", 0L);
         if (end > 0 && System.currentTimeMillis() >= end) {
-            prefs().edit()
-                    .putBoolean(MainActivity.KEY_RUNNING, false)
-                    .putString("reason", "10 dəqiqəlik GOLD sessiyası bitdi")
-                    .putString("nav_state", "Sessiya bitdi")
+            prefs().edit().putBoolean(MainActivity.KEY_RUNNING, false)
+                    .putString("pending_signal", "")
+                    .putString("nav_state", "10 dəqiqəlik GOLD sessiyası bitdi")
                     .apply();
             return false;
         }
         return true;
     }
 
-    private SharedPreferences prefs() {
-        return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE);
-    }
+    private SharedPreferences prefs() { return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE); }
+    private String norm(CharSequence s) { return s == null ? "" : s.toString().trim().toLowerCase(Locale.ROOT); }
+    private String safe(String s) { return s == null ? "naməlum" : s.substring(0, Math.min(s.length(), 140)); }
 
-    private String norm(CharSequence s) {
-        return s == null ? "" : s.toString().trim().toLowerCase(Locale.ROOT);
-    }
-
-    private String safe(String s) {
-        if (s == null) return "naməlum";
-        return s.substring(0, Math.min(s.length(), 120));
-    }
-
-    @Override
-    public void onInterrupt() { }
+    @Override public void onInterrupt() { }
 
     @Override
     public void onDestroy() {
+        handler.removeCallbacks(uiLoop);
         if (scheduler != null) scheduler.shutdownNow();
         super.onDestroy();
     }
@@ -398,11 +604,12 @@ public class XmAccessibilityService extends AccessibilityService {
         final String signal, reason;
         final double price, sl, tp;
         Analysis(String signal, String reason, double price, double sl, double tp) {
-            this.signal = signal;
-            this.reason = reason;
-            this.price = price;
-            this.sl = sl;
-            this.tp = tp;
+            this.signal = signal; this.reason = reason; this.price = price; this.sl = sl; this.tp = tp;
         }
+    }
+
+    static class ClickPair {
+        final AccessibilityNodeInfo left, right;
+        ClickPair(AccessibilityNodeInfo left, AccessibilityNodeInfo right) { this.left = left; this.right = right; }
     }
 }
